@@ -14,8 +14,9 @@ class FliggyScraper(BaseScraper):
 
     async def search_flights(self, from_city: str, to_city: str, date: str, **kwargs):
         """使用 FlyAI CLI 查询航班"""
+        flight_type_filter = kwargs.get("flight_type", "all")
         try:
-            logger.info(f"{self.platform}: 查询 {from_city} -> {to_city} ({date})")
+            logger.info(f"{self.platform}: 查询 {from_city} -> {to_city} ({date}) [筛选:{flight_type_filter}]")
 
             # Windows 和 WSL 兼容的 flyai 调用
             import platform
@@ -48,7 +49,7 @@ class FliggyScraper(BaseScraper):
                 return {"platform": self.platform, "status": "failed", "error": "CLI 调用失败"}
 
             data = json.loads(result.stdout)
-            return self.parse_response(data)
+            return self.parse_response(data, flight_type_filter=flight_type_filter)
 
         except subprocess.TimeoutExpired:
             logger.error(f"{self.platform} 查询超时")
@@ -60,19 +61,55 @@ class FliggyScraper(BaseScraper):
             logger.error(f"{self.platform} 查询失败: {e}")
             return {"platform": self.platform, "status": "failed", "error": str(e)[:100]}
 
-    def parse_response(self, data):
-        """解析 FlyAI 响应"""
+    def parse_response(self, data, flight_type_filter: str = "all"):
+        """解析 FlyAI 响应
+
+        Args:
+            data: API 返回的原始数据
+            flight_type_filter: 筛选类型 "all" | "direct" | "connecting"
+        """
         try:
             items = data.get("data", {}).get("itemList", [])
             if not items:
                 return {"platform": self.platform, "status": "failed", "error": "无航班数据"}
 
-            # 找到真正的最低价（遍历所有航班）
+            # 按类型筛选
+            if flight_type_filter == "direct":
+                filtered = [x for x in items if x["journeys"][0]["journeyType"] == "直达"]
+                items = filtered if filtered else items
+            elif flight_type_filter == "connecting":
+                filtered = [x for x in items if x["journeys"][0]["journeyType"] == "中转"]
+                items = filtered if filtered else items
+
+            # 找到真正的最低价（遍历所有有效航班）
             lowest = min(items, key=lambda x: float(x["ticketPrice"]))
             journey = lowest["journeys"][0]
-            segment = journey["segments"][0]
+            first_seg = journey["segments"][0]
+            last_seg = journey["segments"][-1]  # 中转航班取最后一个航段
 
             price = float(lowest["ticketPrice"])
+            is_connecting = journey["journeyType"] == "中转"
+
+            # 构建所有符合筛选条件的航班列表（用于展示）
+            all_flights = []
+            for x in items[:10]:  # 最多返回10条
+                j = x["journeys"][0]
+                first = j["segments"][0]
+                last = j["segments"][-1]
+                is_conn = j["journeyType"] == "中转"
+                all_flights.append({
+                    "price": int(float(x["ticketPrice"])),
+                    "flightNo": first["marketingTransportNo"],
+                    "airline": first["marketingTransportName"],
+                    "depTime": first["depDateTime"].split(" ")[1][:5],
+                    # 中转航班的到达时间是最后一个航段的到达时间
+                    "arrTime": last["arrDateTime"].split(" ")[1][:5],
+                    "duration": f"{j['totalDuration']}分钟",
+                    "from_airport": first["depStationName"],
+                    "to_airport": last["arrStationName"],
+                    "journey_type": j["journeyType"],
+                    "segments_count": len(j["segments"])
+                })
 
             return {
                 "platform": self.platform,
@@ -81,15 +118,18 @@ class FliggyScraper(BaseScraper):
                 "tax": 0,
                 "currency": "CNY",
                 "flight": {
-                    "number": segment["marketingTransportNo"],
-                    "airline": segment["marketingTransportName"],
-                    "departure": segment["depDateTime"].split(" ")[1][:5],
-                    "arrival": segment["arrDateTime"].split(" ")[1][:5],
-                    "duration": f"{segment['duration']}分钟",
-                    "from_airport": segment["depStationName"],
-                    "to_airport": segment["arrStationName"],
-                    "journey_type": journey["journeyType"]
+                    "number": first_seg["marketingTransportNo"],
+                    "airline": first_seg["marketingTransportName"],
+                    "departure": first_seg["depDateTime"].split(" ")[1][:5],
+                    # 中转航班的到达时间是最后一个航段的到达时间和目的地
+                    "arrival": last_seg["arrDateTime"].split(" ")[1][:5],
+                    "duration": f"{journey['totalDuration']}分钟",
+                    "from_airport": first_seg["depStationName"],
+                    "to_airport": last_seg["arrStationName"],
+                    "journey_type": journey["journeyType"],
+                    "segments_count": len(journey["segments"])
                 },
+                "flights_list": all_flights,
                 "url": lowest.get("jumpUrl", "https://www.fliggy.com")
             }
 

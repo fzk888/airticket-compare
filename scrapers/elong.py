@@ -13,9 +13,10 @@ class ElongScraper(BaseScraper):
         """搜索航班 - 网页版仅支持直飞"""
         from playwright.async_api import async_playwright
         from utils.city_mapper import CityMapper
+        flight_type_filter = kwargs.get("flight_type", "all")
 
         try:
-            logger.info(f"{self.platform}: 查询 {from_city} -> {to_city} ({date})")
+            logger.info(f"{self.platform}: 查询 {from_city} -> {to_city} ({date}) [筛选:直飞]")
 
             from_airports = CityMapper.get_airports(from_city)
             to_airports = CityMapper.get_airports(to_city)
@@ -75,6 +76,11 @@ class ElongScraper(BaseScraper):
                 airline = re.split(r'[|｜]', p_texts[0])[0].strip() if p_texts else "Unknown"
                 flight_no = re.search(r'[A-Z\d]{2}\d{3,4}', text)
 
+                # 从页面文本检测是否为中转航班
+                item_text = etree.tostring(div, encoding='unicode', method='text')
+                is_connecting = '中转' in item_text or '经停' in item_text
+                journey_type = "中转" if is_connecting else "直达"
+
                 flights.append({
                     "price": price,
                     "airline": airline,
@@ -83,6 +89,7 @@ class ElongScraper(BaseScraper):
                     "arr_time": strong_texts[1].strip() if len(strong_texts) > 1 else "",
                     "dep_airport": em_texts[0].strip() if len(em_texts) > 0 else "",
                     "arr_airport": em_texts[1].strip() if len(em_texts) > 1 else "",
+                    "journey_type": journey_type,
                 })
 
             if not flights:
@@ -105,6 +112,7 @@ class ElongScraper(BaseScraper):
                     "duration": "",
                     "from_airport": lowest["dep_airport"],
                     "to_airport": lowest["arr_airport"],
+                    "journey_type": lowest.get("journey_type", "直达"),
                 },
                 "url": "https://www.ly.com"
             }

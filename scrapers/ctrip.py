@@ -48,9 +48,10 @@ class CtripScraper(BaseScraper):
 
     async def search_flights(self, from_city: str, to_city: str, date: str, **kwargs):
         from playwright.async_api import async_playwright
+        flight_type_filter = kwargs.get("flight_type", "all")
 
         try:
-            logger.info(f"{self.platform}: 查询 {from_city} -> {to_city} ({date})")
+            logger.info(f"{self.platform}: 查询 {from_city} -> {to_city} ({date}) [筛选:{flight_type_filter}]")
 
             from_code = CityMapper.get_ctrip_code(from_city) or from_city
             to_code = CityMapper.get_ctrip_code(to_city) or to_city
@@ -95,7 +96,7 @@ class CtripScraper(BaseScraper):
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
 
                 # 直接等待航班列表出现，然后提取数据
-                dom_data = await self.extract_from_page(page)
+                dom_data = await self.extract_from_page(page, flight_type_filter=flight_type_filter)
 
                 await browser.close()
 
@@ -126,7 +127,7 @@ class CtripScraper(BaseScraper):
                             })
                         await context2.add_cookies(pw_cookies2)
                         await page2.goto(url, wait_until="domcontentloaded", timeout=15000)
-                        dom_data = await self.extract_from_page(page2)
+                        dom_data = await self.extract_from_page(page2, flight_type_filter=flight_type_filter)
                         await browser2.close()
                         if dom_data:
                             return dom_data
@@ -200,8 +201,13 @@ class CtripScraper(BaseScraper):
             await browser.close()
             return ctrip_cookies
 
-    async def extract_from_page(self, page):
-        """从页面 DOM 提取航班和价格"""
+    async def extract_from_page(self, page, flight_type_filter: str = "all"):
+        """从页面 DOM 提取航班和价格
+
+        Args:
+            page: Playwright page 对象
+            flight_type_filter: 筛选类型 "all" | "direct" | "connecting"
+        """
         try:
             # 等待页面加载
             await page.wait_for_timeout(5000)
@@ -232,6 +238,15 @@ class CtripScraper(BaseScraper):
                         const depTimeEl = timeEls.length > 0 ? timeEls[0] : null;
                         const arrTimeEl = timeEls.length > 1 ? timeEls[1] : null;
 
+                        // 检测航班类型：查找"经停"或"中转"标识
+                        const itemText = item.innerText || '';
+                        const isConnecting = itemText.includes('经停') || itemText.includes('中转');
+                        const journeyType = isConnecting ? '中转' : '直达';
+
+                        // 统计航班段数：查找所有航班号
+                        const flightNosInItem = itemText.match(/[A-Z]{2}\\d{3,4}/g) || [];
+                        const segmentsCount = flightNosInItem.length || 1;
+
                         if (priceEl) {
                             const priceMatch = priceEl.textContent.match(/\\d+/);
                             if (priceMatch) {
@@ -243,7 +258,9 @@ class CtripScraper(BaseScraper):
                                         flightNo: flightNo,
                                         airline: airlineEl ? airlineEl.innerText.split('\\n')[0].trim() : 'Unknown',
                                         depTime: depTimeEl ? depTimeEl.textContent.trim() : '',
-                                        arrTime: arrTimeEl ? arrTimeEl.textContent.trim() : ''
+                                        arrTime: arrTimeEl ? arrTimeEl.textContent.trim() : '',
+                                        journeyType: journeyType,
+                                        segmentsCount: segmentsCount
                                     });
                                 }
                             }
@@ -257,8 +274,31 @@ class CtripScraper(BaseScraper):
 
             if flights:
                 valid = [f for f in flights if f["price"] > 50]
+
+                # 按类型筛选
+                if flight_type_filter == "direct":
+                    filtered = [f for f in valid if f["journeyType"] == "直达"]
+                    valid = filtered if filtered else valid
+                elif flight_type_filter == "connecting":
+                    filtered = [f for f in valid if f["journeyType"] == "中转"]
+                    valid = filtered if filtered else valid
+
                 if valid:
                     lowest = min(valid, key=lambda x: x["price"])
+                    # 构建所有符合筛选条件的航班列表（最多10条）
+                    all_flights = [{
+                        "price": f["price"],
+                        "flightNo": f["flightNo"],
+                        "airline": f["airline"],
+                        "depTime": f["depTime"],
+                        "arrTime": f["arrTime"],
+                        "duration": "",
+                        "from_airport": "",
+                        "to_airport": "",
+                        "journey_type": f["journeyType"],
+                        "segments_count": f["segmentsCount"]
+                    } for f in sorted(valid, key=lambda x: x["price"])[:10]]
+
                     return {
                         "platform": self.platform, "status": "success",
                         "lowest_price": lowest["price"],
@@ -267,7 +307,10 @@ class CtripScraper(BaseScraper):
                             "number": lowest["flightNo"], "airline": lowest["airline"],
                             "departure": lowest["depTime"], "arrival": lowest["arrTime"],
                             "duration": "", "from_airport": "", "to_airport": "",
+                            "journey_type": lowest["journeyType"],
+                            "segments_count": lowest["segmentsCount"]
                         },
+                        "flights_list": all_flights,
                         "url": "https://flights.ctrip.com"
                     }
             return None
