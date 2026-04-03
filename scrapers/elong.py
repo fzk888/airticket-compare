@@ -76,9 +76,12 @@ class ElongScraper(BaseScraper):
                 airline = re.split(r'[|｜]', p_texts[0])[0].strip() if p_texts else "Unknown"
                 flight_no = re.search(r'[A-Z\d]{2}\d{3,4}', text)
 
-                # 从页面文本检测是否为中转航班
+                # 从页面文本检测航班类型
+                # "经停" = 途经短停，仍算直飞
+                # "中转" = 需换航班段的真正中转
                 item_text = etree.tostring(div, encoding='unicode', method='text')
-                is_connecting = '中转' in item_text or '经停' in item_text
+                is_connecting = '中转' in item_text
+                is_stopover = '经停' in item_text  # 经停仍算直飞
                 journey_type = "中转" if is_connecting else "直达"
 
                 flights.append({
@@ -90,6 +93,7 @@ class ElongScraper(BaseScraper):
                     "dep_airport": em_texts[0].strip() if len(em_texts) > 0 else "",
                     "arr_airport": em_texts[1].strip() if len(em_texts) > 1 else "",
                     "journey_type": journey_type,
+                    "stopover": is_stopover,  # 经停标记
                 })
 
             if not flights:
@@ -113,7 +117,20 @@ class ElongScraper(BaseScraper):
                     "from_airport": lowest["dep_airport"],
                     "to_airport": lowest["arr_airport"],
                     "journey_type": lowest.get("journey_type", "直达"),
+                    "stopover": lowest.get("stopover", False),
                 },
+                "flights_list": [{
+                    "price": f["price"],
+                    "flightNo": f["flight_no"],
+                    "airline": f["airline"],
+                    "depTime": f["dep_time"],
+                    "arrTime": f["arr_time"],
+                    "duration": "",
+                    "from_airport": f["dep_airport"],
+                    "to_airport": f["arr_airport"],
+                    "journey_type": f["journey_type"],
+                    "stopover": f.get("stopover", False),
+                } for f in sorted(flights, key=lambda x: x["price"])[:10]],
                 "url": "https://www.ly.com"
             }
 

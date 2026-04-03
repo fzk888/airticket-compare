@@ -58,23 +58,46 @@ class CtripScraper(BaseScraper):
 
             cookies = self.load_cookies()
 
-            # 没有cookies或过期，弹窗让用户登录
+            # 没有 cookies 则先登录（登录流程自己启动浏览器）
             if not cookies:
                 await self._login_and_get_cookies()
                 cookies = self.load_cookies()
 
+            # 有 cookies 时静默查询
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=True,
-                    args=["--disable-blink-features=AutomationControlled"]
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-accelerated-2d-canvas",
+                        "--disable-gpu"
+                    ]
                 )
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                    locale="zh-CN"
+                    locale="zh-CN",
+                    viewport={"width": 1920, "height": 1080}
                 )
                 await context.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                     window.chrome = { runtime: {} };
+                """)
+                
+                # 注入中文字体 CSS，解决 Linux 下中文显示方框问题
+                await context.add_init_script("""
+                    const style = document.createElement('style');
+                    style.textContent = `
+                        * {
+                            font-family: "Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Zen Hei", sans-serif !important;
+                        }
+                        body, html {
+                            font-family: "Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Zen Hei", sans-serif !important;
+                        }
+                    `;
+                    document.head.appendChild(style);
                 """)
 
                 page = await context.new_page()
@@ -93,7 +116,21 @@ class CtripScraper(BaseScraper):
                 await context.add_cookies(pw_cookies)
 
                 url = f"https://flights.ctrip.com/online/list/oneway-{from_code}-{to_code}?depdate={date}"
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                logger.info(f"{self.platform}: 访问 {url}")
+                
+                # 增加超时时间，添加重试
+                max_retries = 2
+                for attempt in range(max_retries):
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(5000)  # 等待页面渲染
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"{self.platform}: 页面加载失败，重试 ({attempt+1}/{max_retries}): {e}")
+                            await page.wait_for_timeout(2000)
+                        else:
+                            raise
 
                 # 直接等待航班列表出现，然后提取数据
                 dom_data = await self.extract_from_page(page, flight_type_filter=flight_type_filter)
@@ -103,18 +140,27 @@ class CtripScraper(BaseScraper):
                 if dom_data:
                     return dom_data
 
-                # cookies可能过期，重新登录
-                await self._login_and_get_cookies()
-                cookies = self.load_cookies()
-                if cookies:
-                    # 重试一次
-                    async with async_playwright() as p2:
-                        browser2 = await p2.chromium.launch(
-                            headless=True,
-                            args=["--disable-blink-features=AutomationControlled"]
+                # 数据提取失败，检查 cookies 是否存在，存在则不重新登录
+                cookies_now = self.load_cookies()
+                if not cookies_now:
+                    # cookies 过期或无效，重新登录
+                    await self._login_and_get_cookies()
+                    cookies = self.load_cookies()
+                    if cookies:
+                        # 重试一次
+                        async with async_playwright() as p2:
+                            browser2 = await p2.chromium.launch(
+                                headless=True,
+                            args=[
+                                "--disable-blink-features=AutomationControlled",
+                                "--no-sandbox",
+                                "--disable-setuid-sandbox",
+                                "--disable-dev-shm-usage"
+                            ]
                         )
                         context2 = await browser2.new_context(
-                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                            viewport={"width": 1920, "height": 1080}
                         )
                         page2 = await context2.new_page()
                         pw_cookies2 = []
@@ -126,7 +172,8 @@ class CtripScraper(BaseScraper):
                                 "path": c.get("path", "/"),
                             })
                         await context2.add_cookies(pw_cookies2)
-                        await page2.goto(url, wait_until="domcontentloaded", timeout=15000)
+                        await page2.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await page2.wait_for_timeout(5000)
                         dom_data = await self.extract_from_page(page2, flight_type_filter=flight_type_filter)
                         await browser2.close()
                         if dom_data:
@@ -152,10 +199,35 @@ class CtripScraper(BaseScraper):
         print(f"{'='*50}\n")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-            context = await browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            browser = await p.chromium.launch(
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
             )
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                locale="zh-CN",
+                viewport={"width": 1920, "height": 1080}
+            )
+            
+            # 注入中文字体 CSS
+            await context.add_init_script("""
+                const style = document.createElement('style');
+                style.textContent = `
+                    * {
+                        font-family: "Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Zen Hei", sans-serif !important;
+                    }
+                    body, html {
+                        font-family: "Microsoft YaHei", "SimHei", "SimSun", "WenQuanYi Zen Hei", sans-serif !important;
+                    }
+                `;
+                document.head.appendChild(style);
+            """)
+            
             page = await context.new_page()
             await page.goto('https://flights.ctrip.com/online/list/oneway-SZX-PEK?depdate=2026-04-20')
 
@@ -163,9 +235,10 @@ class CtripScraper(BaseScraper):
             print("如果有图形验证码，请完成验证...")
             print("登录成功后系统会自动继续...\n")
 
-            # 等待登录成功
-            for i in range(120):  # 最多等10分钟（给足够时间完成验证码）
-                await asyncio.sleep(5)
+            # 等待登录成功（最多30秒，每2秒检测一次）
+            login_detected = False
+            for i in range(15):
+                await asyncio.sleep(2)
                 try:
                     cookies = await context.cookies()
                     has_login = any(c['name'] in ['cticket', 'login_uid', 'login_type'] for c in cookies)
@@ -173,16 +246,16 @@ class CtripScraper(BaseScraper):
                         # 检查页面是否有验证码弹窗
                         captcha = await page.query_selector('[class*="captcha"], [class*="Captcha"], [id*="captcha"], .tcaptcha, #tcaptcha')
                         if captcha:
-                            print(f"检测到验证码，请完成验证... ({(i+1)*5}秒)")
+                            print(f"检测到验证码，请完成验证... ({(i+1)*2}秒)")
                             continue
 
                         # 检查是否有航班数据加载
                         flight_items = await page.query_selector_all("[class*=flight-item]")
-                        if len(flight_items) > 0:
-                            # 有航班数据了，说明登录+验证都完成
+                        if len(flight_items) > 0 or login_detected:
+                            print(f"登录成功！")
+                            login_detected = True
                             break
-
-                        print(f"登录成功，等待页面加载... ({(i+1)*5}秒)")
+                        print(f"登录成功，等待页面加载... ({(i+1)*2}秒)")
                 except Exception as e:
                     pass
 

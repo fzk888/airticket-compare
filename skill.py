@@ -1,9 +1,15 @@
 """机票比价 Skill 主入口"""
 import asyncio
+import os
 from datetime import datetime
-from scrapers import CtripScraper, FliggyScraper, ElongScraper
+from scrapers import CtripScraper, FliggyScraper, ElongScraper, QunarScraper
 from utils import CityMapper, Visualizer, setup_logger
 from loguru import logger
+
+# 自动设置 DISPLAY 环境变量（WSL2 环境需要）
+if not os.environ.get('DISPLAY') and os.path.exists('/tmp/.X11-unix/X0'):
+    os.environ['DISPLAY'] = ':0'
+    logger.info("自动设置 DISPLAY=:0")
 
 setup_logger()
 
@@ -61,8 +67,8 @@ async def compare_prices(from_city: str, to_city: str, depart_date: str,
     print(f"   {from_city} ({', '.join(from_airports)}) → {to_city} ({', '.join(to_airports)})")
     print(f"   日期: {depart_date} | 类型: {type_desc}\n")
 
-    # 并发查询三个平台
-    scrapers = [CtripScraper(), FliggyScraper(), ElongScraper()]
+    # 并发查询四个平台
+    scrapers = [CtripScraper(), FliggyScraper(), ElongScraper(), QunarScraper()]
     tasks = [search_single_platform(s, from_city, to_city, from_airports, to_airports, depart_date,
                                    cabin_class=cabin_class, time_range=time_range,
                                    flight_type=flight_type)
@@ -175,7 +181,9 @@ def main():
                 for platform, f in sorted(direct_by_platform.items(), key=lambda x: x[1]["price"]):
                     flight_no = f.get("flightNo", f.get("number", ""))
                     dep_time = f.get("depTime", f.get("departure", ""))
-                    print(f"    {platform}: ¥{f['price']} - {flight_no} {dep_time}")
+                    stopover = f.get("stopover", False)
+                    stopover_note = "(经停)" if stopover else ""
+                    print(f"    {platform}: ¥{f['price']} - {flight_no} {dep_time}{stopover_note}")
             else:
                 print("  无直飞航班")
 
@@ -222,8 +230,10 @@ def main():
                 if r.get("status") == "success":
                     f = r["flight"]
                     journey_type = f.get("journey_type", "")
+                    stopover = f.get("stopover", False)
                     type_icon = "✈️" if journey_type == "直达" else "🔄"
-                    print(f"   {r['platform']}: ¥{r['lowest_price']} - {f['number']} {f['departure']} {type_icon}{journey_type}")
+                    stopover_note = "(经停)" if stopover else ""
+                    print(f"   {r['platform']}: ¥{r['lowest_price']} - {f['number']} {f['departure']} {type_icon}{journey_type}{stopover_note}")
                 else:
                     print(f"   {r['platform']}: {r.get('error', '失败')}")
 
