@@ -46,6 +46,78 @@ class CtripScraper(BaseScraper):
 
         return None
 
+    async def search_by_flight_no(self, origin: str, transport_no: str, date: str,
+                                   to_city: str = None, to_code: str = None):
+        """按航班号查询携程价格。需要目的地信息（城市名或代码）。"""
+        try:
+            from_code = CityMapper.get_ctrip_code(origin) or origin
+            if not to_code:
+                to_code = CityMapper.get_ctrip_code(to_city) if to_city else None
+            if not to_code:
+                return {"platform": self.platform, "status": "failed", "error": "缺少目的地信息"}
+
+            cookies = self.load_cookies()
+            if not cookies:
+                await self._login_and_get_cookies()
+                cookies = self.load_cookies()
+
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                          "--disable-dev-shm-usage", "--disable-gpu"]
+                )
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    locale="zh-CN", viewport={"width": 1920, "height": 1080}
+                )
+                await context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    window.chrome = { runtime: {} };
+                """)
+                page = await context.new_page()
+                pw_cookies = [{"name": c["name"], "value": c["value"],
+                               "domain": c.get("domain", ".ctrip.com"), "path": c.get("path", "/")}
+                              for c in cookies]
+                await context.add_cookies(pw_cookies)
+
+                # 携程支持在 URL 中加 flightno 参数筛选航班号
+                url = (f"https://flights.ctrip.com/online/list/oneway-{from_code}-{to_code}"
+                       f"?depdate={date}&flightno={transport_no}")
+                logger.info(f"{self.platform}: 按航班号查询 {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(5000)
+
+                result = await self.extract_from_page(page, flight_type_filter="all",
+                                                      transport_no=transport_no)
+                await browser.close()
+
+            if result and result.get("status") == "success":
+                f = result["flight"]
+                return {
+                    "platform": self.platform,
+                    "status": "success",
+                    "transport_no": transport_no,
+                    "price": result["lowest_price"],
+                    "currency": "CNY",
+                    "flight": {
+                        "number": f["number"],
+                        "airline": f["airline"],
+                        "from_city": origin,
+                        "to_city": to_city or to_code,
+                        "departure": f["departure"],
+                        "arrival": f["arrival"],
+                        "journey_type": f.get("journey_type", ""),
+                    },
+                    "url": result.get("url", "https://flights.ctrip.com")
+                }
+            return {"platform": self.platform, "status": "failed", "error": "未找到该航班"}
+
+        except Exception as e:
+            logger.error(f"{self.platform} 按航班号查询失败: {e}")
+            return {"platform": self.platform, "status": "failed", "error": str(e)[:100]}
+
     async def search_flights(self, from_city: str, to_city: str, date: str, **kwargs):
         from playwright.async_api import async_playwright
         flight_type_filter = kwargs.get("flight_type", "all")
@@ -274,7 +346,7 @@ class CtripScraper(BaseScraper):
             await browser.close()
             return ctrip_cookies
 
-    async def extract_from_page(self, page, flight_type_filter: str = "all"):
+    async def extract_from_page(self, page, flight_type_filter: str = "all", transport_no: str = None):
         """从页面 DOM 提取航班和价格
 
         Args:
@@ -284,6 +356,28 @@ class CtripScraper(BaseScraper):
         try:
             # 等待页面加载
             await page.wait_for_timeout(5000)
+
+            # 按航班号查询时滚动加载，直到找到目标航班或到达页面底部
+            if transport_no:
+                no_upper = transport_no.upper()
+                for _ in range(10):  # 最多滚动10次
+                    found = await page.evaluate("""
+                        (no) => {
+                            const items = document.querySelectorAll('[class*="flight-item"]');
+                            for (const item of items) {
+                                if (item.innerHTML.includes(no)) return true;
+                            }
+                            return false;
+                        }
+                    """, no_upper)
+                    if found:
+                        break
+                    prev_height = await page.evaluate("document.body.scrollHeight")
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(2000)
+                    new_height = await page.evaluate("document.body.scrollHeight")
+                    if new_height == prev_height:
+                        break  # 已到底部
 
             # 直接查找元素，不要求可见
             flights = await page.evaluate("""
@@ -347,6 +441,14 @@ class CtripScraper(BaseScraper):
 
             if flights:
                 valid = [f for f in flights if f["price"] > 50]
+
+                # 按航班号过滤（如果指定）
+                if transport_no:
+                    no_upper = transport_no.upper()
+                    filtered = [f for f in valid if f["flightNo"].upper() == no_upper]
+                    if not filtered:
+                        return None  # 找不到该航班号，不回退到全部航班
+                    valid = filtered
 
                 # 按类型筛选
                 if flight_type_filter == "direct":

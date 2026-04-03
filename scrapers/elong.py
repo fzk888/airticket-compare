@@ -9,6 +9,58 @@ class ElongScraper(BaseScraper):
         super().__init__()
         self.platform = "同程"
 
+    async def search_by_flight_no(self, origin: str, transport_no: str, date: str,
+                                   to_city: str = None, to_code: str = None):
+        """按航班号查询同程价格。需要目的地信息。"""
+        from playwright.async_api import async_playwright
+        from utils.city_mapper import CityMapper
+        try:
+            from_airports = CityMapper.get_airports(origin)
+            if not from_airports:
+                return {"platform": self.platform, "status": "failed", "error": "出发城市代码无效"}
+            from_code = from_airports[0]
+            if not to_code:
+                to_airports = CityMapper.get_airports(to_city) if to_city else []
+                to_code = to_airports[0] if to_airports else None
+            if not to_code:
+                return {"platform": self.platform, "status": "failed", "error": "缺少目的地信息"}
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                url = f"https://www.ly.com/flights/itinerary/oneway/{from_code}-{to_code}?date={date}"
+                logger.info(f"{self.platform}: 按航班号查询 {transport_no} | {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(5000)
+                html = await page.content()
+                await browser.close()
+
+            result = self.parse_html(html, transport_no=transport_no)
+            if result.get("status") == "success":
+                f = result["flight"]
+                return {
+                    "platform": self.platform,
+                    "status": "success",
+                    "transport_no": transport_no,
+                    "price": result["lowest_price"],
+                    "currency": "CNY",
+                    "flight": {
+                        "number": f["number"],
+                        "airline": f["airline"],
+                        "from_city": origin,
+                        "to_city": to_city or to_code,
+                        "departure": f["departure"],
+                        "arrival": f["arrival"],
+                        "journey_type": f.get("journey_type", ""),
+                    },
+                    "url": result.get("url", "https://www.ly.com")
+                }
+            return {"platform": self.platform, "status": "failed", "error": "未找到该航班"}
+
+        except Exception as e:
+            logger.error(f"{self.platform} 按航班号查询失败: {e}")
+            return {"platform": self.platform, "status": "failed", "error": str(e)[:100]}
+
     async def search_flights(self, from_city: str, to_city: str, date: str, **kwargs):
         """搜索航班 - 网页版仅支持直飞"""
         from playwright.async_api import async_playwright
@@ -44,7 +96,7 @@ class ElongScraper(BaseScraper):
             logger.error(f"{self.platform} 查询失败: {e}")
             return {"platform": self.platform, "status": "failed", "error": str(e)[:100]}
 
-    def parse_html(self, html: str):
+    def parse_html(self, html: str, transport_no: str = None):
         """解析HTML提取航班数据"""
         from lxml import etree
         import re
@@ -98,6 +150,14 @@ class ElongScraper(BaseScraper):
 
             if not flights:
                 return {"platform": self.platform, "status": "failed", "error": "未提取到航班"}
+
+            # 按航班号过滤（如果指定）
+            if transport_no:
+                no_upper = transport_no.upper()
+                filtered = [f for f in flights if f["flight_no"].upper() == no_upper]
+                if not filtered:
+                    return {"platform": self.platform, "status": "failed", "error": "未找到该航班"}
+                flights = filtered
 
             lowest = min(flights, key=lambda x: x["price"])
             logger.info(f"{self.platform}: 找到 {len(flights)} 个直飞航班，最低价 ¥{lowest['price']}")

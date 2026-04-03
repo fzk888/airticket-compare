@@ -2,7 +2,7 @@
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')  # 非GUI后端
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']  # 中文字体
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei']  # 中文字体，YaHei 支持 ¥ 符号
 plt.rcParams['axes.unicode_minus'] = False  # 负号显示
 
 class Visualizer:

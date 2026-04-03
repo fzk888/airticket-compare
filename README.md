@@ -24,6 +24,8 @@ playwright install chromium
 
 ### 命令行
 
+**比价模式**（对比多平台最低价）：
+
 ```bash
 # 位置参数
 python skill.py 深圳 上海 2026-04-20
@@ -31,10 +33,23 @@ python skill.py 深圳 上海 2026-04-20
 # 命名参数
 python skill.py --from 深圳 --to 上海 --date 2026-04-20
 
-# 航班类型筛选 (all/直飞, direct/直飞, connecting/中转)
-python skill.py 深圳 上海 2026-04-20 --flight-type all      # 全部（默认）
-python skill.py 深圳 上海 2026-04-20 --flight-type direct    # 仅直飞
-python skill.py 深圳 上海 2026-04-20 --flight-type connecting # 仅中转
+# 航班类型筛选
+python skill.py 深圳 上海 2026-04-20 --flight-type all       # 全部（默认，分直飞/中转显示）
+python skill.py 深圳 上海 2026-04-20 --flight-type direct     # 仅直飞
+python skill.py 深圳 上海 2026-04-20 --flight-type connecting  # 仅中转
+```
+
+**航班号查询模式**（查询指定航班在各平台的价格）：
+
+```bash
+# 出发城市 + 航班号 + 日期（自动推断目的地）
+python skill.py 深圳 CZ3171 2026-04-20
+
+# 指定目的地（更快，4平台并发）
+python skill.py 深圳 北京 CZ3171 2026-04-20
+
+# 使用 --transport-no 参数
+python skill.py 深圳 --to 北京 --transport-no CZ3171 --date 2026-04-20
 ```
 
 ### Python调用
@@ -64,12 +79,14 @@ asyncio.run(search())
 
 ## 平台说明
 
-| 平台 | 登录要求 | 直飞/中转 | 说明 |
-|------|---------|---------|------|
-| 飞猪 | 不需要 | 均支持 | 官方 API，最稳定 |
-| 同程 | 不需要 | 仅直飞 | 网页爬虫，含经停识别 |
-| 携程 | **需要** | 均支持 | 网页爬虫，cookies 登录 |
-| 去哪儿 | **需要** | 均支持 | 网页爬虫，cookies 登录 |
+| 平台 | 登录要求 | 直飞/中转 | 航班号查询 | 说明 |
+|------|---------|---------|----------|------|
+| 飞猪 | 不需要 | 均支持 | ✅ 支持（含中转） | 官方 API，最稳定 |
+| 同程 | 不需要 | 仅直飞 | ✅ 支持（仅直飞） | 网页爬虫，含经停识别；**网页价格高于 App，仅供参考** |
+| 携程 | **需要** | 均支持 | ✅ 支持 | 网页爬虫，cookies 登录 |
+| 去哪儿 | **需要** | 均支持 | ✅ 支持 | 网页爬虫，cookies 登录；**App 价格略低于网页** |
+
+> ⚠️ 本工具查询的均为各平台**官网/网页端**价格。同程 App 价格显著低于网页端，且网页端无中转航班；去哪儿 App 价格略低于网页端。实际购票建议以 App 为准。
 
 ## 去哪儿反爬虫机制
 

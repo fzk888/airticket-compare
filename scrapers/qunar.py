@@ -45,6 +45,81 @@ class QunarScraper(BaseScraper):
 
         return None
 
+    async def search_by_flight_no(self, origin: str, transport_no: str, date: str,
+                                   to_city: str = None, to_code: str = None):
+        """按航班号查询去哪儿价格。需要目的地信息。"""
+        try:
+            if not to_code:
+                to_code = CityMapper.get_airports(to_city)[0] if to_city and CityMapper.get_airports(to_city) else None
+            if not to_code:
+                return {"platform": self.platform, "status": "failed", "error": "缺少目的地信息"}
+
+            from_code = CityMapper.get_airports(origin)[0] if CityMapper.get_airports(origin) else origin
+            cookies = self.load_cookies()
+            if not cookies:
+                await self._login_and_get_cookies()
+                cookies = self.load_cookies()
+                if not cookies:
+                    return {"platform": self.platform, "status": "failed", "error": "登录失败"}
+
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                          "--disable-dev-shm-usage", "--disable-gpu"]
+                )
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    locale="zh-CN", viewport={"width": 1920, "height": 1080}
+                )
+                await context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    window.chrome = { runtime: {} };
+                """)
+                page = await context.new_page()
+                pw_cookies = [{"name": c["name"], "value": c["value"],
+                               "domain": c.get("domain", ".qunar.com"), "path": c.get("path", "/")}
+                              for c in cookies]
+                await context.add_cookies(pw_cookies)
+
+                url = (f"https://flight.qunar.com/site/oneway_list.htm"
+                       f"?searchDepartureAirport={origin}&searchArrivalAirport={to_city or to_code}"
+                       f"&searchDepartureTime={date}&nextNDays=0&startSearch=true"
+                       f"&fromCode={from_code}&toCode={to_code}&from=flight_dom_search")
+                logger.info(f"{self.platform}: 按航班号查询 {transport_no} | {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(5000)
+
+                result = await self.extract_from_page(page, flight_type_filter="all",
+                                                      transport_no=transport_no)
+                await browser.close()
+
+            if result and result.get("status") == "success":
+                f = result["flight"]
+                return {
+                    "platform": self.platform,
+                    "status": "success",
+                    "transport_no": transport_no,
+                    "price": result["lowest_price"],
+                    "currency": "CNY",
+                    "flight": {
+                        "number": f["number"],
+                        "airline": f.get("airline", ""),
+                        "from_city": origin,
+                        "to_city": to_city or to_code,
+                        "departure": f["departure"],
+                        "arrival": f["arrival"],
+                        "journey_type": f.get("journey_type", ""),
+                    },
+                    "url": result.get("url", "https://flight.qunar.com")
+                }
+            return {"platform": self.platform, "status": "failed", "error": "未找到该航班"}
+
+        except Exception as e:
+            logger.error(f"{self.platform} 按航班号查询失败: {e}")
+            return {"platform": self.platform, "status": "failed", "error": str(e)[:100]}
+
     async def search_flights(self, from_city: str, to_city: str, date: str, **kwargs):
         from playwright.async_api import async_playwright
         flight_type_filter = kwargs.get("flight_type", "all")
@@ -279,7 +354,7 @@ class QunarScraper(BaseScraper):
 
         return price_list
 
-    async def extract_from_page(self, page, flight_type_filter: str = "all"):
+    async def extract_from_page(self, page, flight_type_filter: str = "all", transport_no: str = None):
         """从页面 DOM 提取航班和价格"""
         try:
             # 轮询等待航班列表出现，最多等15秒
@@ -289,8 +364,31 @@ class QunarScraper(BaseScraper):
                     break
                 await page.wait_for_timeout(1000)
             else:
-                # 超时，尝试用 fallback
                 logger.debug(f"{self.platform}: 等待航班列表超时")
+
+            # 按航班号查询时翻页查找目标航班（去哪儿为分页模式，非无限滚动）
+            if transport_no:
+                no_upper = transport_no.upper()
+                for page_num in range(1, 11):  # 最多翻10页
+                    found = await page.evaluate("""
+                        (no) => {
+                            const airflys = document.querySelectorAll('.b-airfly');
+                            for (const el of airflys) {
+                                if ((el.innerText || '').includes(no)) return true;
+                            }
+                            return false;
+                        }
+                    """, no_upper)
+                    if found:
+                        logger.debug(f"{self.platform}: 在第{page_num}页找到 {no_upper}")
+                        break
+                    # 点下一页：直接按页码链接点击
+                    next_page_btn = page.locator(f'a[data-pager-pageno="{page_num + 1}"]')
+                    if await next_page_btn.count() == 0:
+                        break  # 没有更多页
+                    await next_page_btn.click()
+                    await page.wait_for_timeout(3000)
+
             import re
 
             # 从 .b-airfly 精确提取每行航班信息和价格
@@ -350,6 +448,14 @@ class QunarScraper(BaseScraper):
 
             if not flights_raw:
                 flights_raw = []
+
+            # 按航班号过滤（如果指定）
+            if transport_no:
+                no_upper = transport_no.upper()
+                filtered = [f for f in flights_raw if f["flightNo"].upper() == no_upper]
+                if not filtered:
+                    return None  # 找不到该航班号，不回退到全部航班
+                flights_raw = filtered
 
             # 分类：直飞和中转
             direct_flights = sorted([f for f in flights_raw if not f['isConnecting']], key=lambda x: x["price"])
