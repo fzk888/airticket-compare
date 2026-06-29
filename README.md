@@ -194,26 +194,96 @@ export CTRIP_COOKIES='[{"name":"cticket","value":"xxx",...},...]'
 }
 ```
 
+## 酒店比价（crawlers/）
+
+除机票外，本仓库还从 RideClaw 迁移了一套**多平台酒店 + 机票爬虫**，位于独立的 `crawlers/` 命名空间（与 `scrapers/` 互不影响，使用 DrissionPage 而非 Playwright）。
+
+支持的酒店平台：
+
+| 平台 | 登录要求 | 实现 | Cookie 文件 |
+|------|---------|------|------------|
+| 携程 | **需要** | requests 直连 H5 API | `config/ctrip_cookie.txt` |
+| 飞猪 | **需要** | DrissionPage SSR 解析 | `config/fliggy_cookie.txt` |
+| 同程 | **需要** | DrissionPage Vue DOM 解析 | `config/tongcheng_cookie.txt` |
+
+> 飞猪还提供一个基于 FlyAI CLI 的变体 `FliggyHotelFlyAISpider`，走官方 API 更稳，但需要安装 `flyai` CLI 与 `FLYAI_API_KEY`。
+
+### 使用方式
+
+```bash
+# 列表最低价（按城市查）
+python hotel_skill.py 上海 2026-07-01 2026-07-02
+
+# 指定酒店名（横向比价同一酒店）
+python hotel_skill.py 上海 2026-07-01 2026-07-02 --hotel-name 桔子酒店真如
+
+# 只查部分平台
+python hotel_skill.py 上海 2026-07-01 2026-07-02 --sources ctrip,fliggy
+```
+
+### Cookie 配置
+
+三平台酒店价格均为登录态接口，必须配置有效 Cookie：
+
+```bash
+cp config/ctrip_cookie.txt.example config/ctrip_cookie.txt     # 后填入真实 Cookie
+cp config/fliggy_cookie.txt.example config/fliggy_cookie.txt
+cp config/tongcheng_cookie.txt.example config/tongcheng_cookie.txt
+```
+
+Cookie 获取：浏览器登录对应平台后，从开发者工具 Network 中复制任一请求的 `Cookie` 头，整行粘贴即可。真实的 `*_cookie.txt` 不会被提交（见 `.gitignore`）。
+
+### FlyAI（可选）
+
+飞猪 FlyAI 爬虫（机票 + 酒店）走官方 API，比网页爬虫稳定，但需要：
+
+```bash
+npm i -g @fly-ai/flyai-cli      # 安装 CLI
+flyai --help                     # 验证
+# 配置 API Key（参考 config/flyai.env.example）
+export FLYAI_API_KEY=your_key
+```
+
+### crawlers/ 也提供机票爬虫
+
+`crawlers/flight/` 下同样有携程 H5 / 飞猪 / 同程的机票爬虫（DrissionPage 实现，与 `scrapers/` 下的 Playwright 版本是两套并行实现，按需选用）。例如：
+
+```python
+from crawlers.flight.ctrip_h5 import CtripH5Drission
+with CtripH5Drission(headless=True) as spider:
+    flights = spider.search_flights("SHA", "PEK", "2026-07-01")
+```
+
 ## 项目结构
 
 ```
 price-comparison/
-├── skill.py              # 主入口
-├── config.py             # 配置文件
-├── cookies.json          # 携程 cookies（自动生成）
-├── cookies_qunar.json    # 去哪儿 cookies（自动生成）
+├── skill.py              # 机票比价主入口（Playwright scrapers/）
+├── hotel_skill.py        # 酒店比价主入口（RideClaw 迁移的 crawlers/）
+├── hotel_skill_adapters.py  # 酒店 crawlers 的 async 适配胶水
+├── config.py             # 机票配置
+├── cookies.json          # 携程 cookies（机票，自动生成）
+├── cookies_qunar.json    # 去哪儿 cookies（机票，自动生成）
 ├── SKILL.md             # OpenClaw 技能定义
-├── scrapers/
+├── scrapers/             # 机票爬虫（Playwright，原有）
 │   ├── __init__.py
-│   ├── base.py          # 基础爬虫类
-│   ├── ctrip.py         # 携程爬虫
-│   ├── fliggy.py        # 飞猪爬虫
-│   ├── elong.py          # 同程爬虫
-│   └── qunar.py          # 去哪儿爬虫
+│   ├── base.py
+│   ├── ctrip.py
+│   ├── fliggy.py
+│   ├── elong.py
+│   └── qunar.py
+├── crawlers/             # 酒店+机票爬虫（DrissionPage，从 RideClaw 迁移）
+│   ├── core/             # 公共基础：browser_base / stdio / utils
+│   ├── flight/           # 携程H5 / 飞猪 / 同程 机票
+│   └── hotel/            # 携程 / 飞猪 / 同程 酒店
+├── config/               # crawlers 用的 cookie 与 FlyAI 配置
+│   ├── *_cookie.txt.example
+│   └── flyai.env.example
 └── utils/
-    ├── city_mapper.py   # 城市-机场代码映射
-    └── visualizer.py    # 图表生成
+    ├── city_mapper.py
+    └── visualizer.py
 ```
+
 
 ## 注意事项
 

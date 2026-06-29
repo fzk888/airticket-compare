@@ -35,6 +35,10 @@ env/
 cookies.json
 *.log
 
+# RideClaw migrated crawler credentials (真实凭据本地放置，不入库)
+config/*_cookie.txt
+.env
+
 # OS
 .DS_Store
 Thumbs.db

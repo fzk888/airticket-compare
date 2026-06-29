@@ -6,3 +6,6 @@ fake-useragent>=1.5.0
 python-dateutil>=2.8.0
 loguru>=0.7.0
 playwright>=1.42.0
+# RideClaw 迁移的爬虫（crawlers/）所需：DrissionPage 驱动携程 H5 / 飞猪 / 同程
+DrissionPage>=4.0.0
+requests>=2.31.0
